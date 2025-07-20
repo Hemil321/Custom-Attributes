@@ -6,7 +6,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using CustomAttributes;
-using ReverseTowerDefense.Utils;
 using Unity.VisualScripting;
 using UnityEditor;
 using UnityEditorInternal;
@@ -31,6 +30,20 @@ namespace ReverseTowerDefense
                 ShowList = showList;
                 ListElementName = listElementName;
                 IsCustomDataTypeList = isCustomDataTypeList;
+            }
+        }
+
+        public struct FoldoutInfo
+        {
+            public int StartIndex;
+            public int EndIndex;
+            public string Label;
+
+            public FoldoutInfo(int startIndex, int endIndex, string label)
+            {
+                StartIndex = startIndex;
+                EndIndex = endIndex;
+                Label = label;
             }
         }
 
@@ -912,14 +925,14 @@ namespace ReverseTowerDefense
 
             if (conditionField == null)
             {
-                this.LogError($"Condition field with the name \"{conditionFieldName}\" Doesn't exist! \n Check if you have typed the name properly in the class!");
+                Debug.LogError($"Condition field with the name \"{conditionFieldName}\" Doesn't exist! \n Check if you have typed the name properly in the class!");
 
                 canDraw = false;
                 return;
             }
             else if (conditionField.FieldType != conditionFieldValue.GetType())
             {
-                this.LogError($"The condition field value is of type {conditionFieldValue.GetType().Name}, which doesn't match with type {conditionField.FieldType.Name} of the condition field \"{conditionFieldName}\""!);
+                Debug.LogError($"The condition field value is of type {conditionFieldValue.GetType().Name}, which doesn't match with type {conditionField.FieldType.Name} of the condition field \"{conditionFieldName}\""!);
 
                 canDraw = false;
                 return;

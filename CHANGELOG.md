@@ -18,3 +18,13 @@
 
 \- Made lists draw custom fields(upto 1 indent for now)
 
+
+
+\## \[1.1.1] - 2025-07-20
+
+\### Dependency Bug Fixes
+
+* Fixed a dependency issue with Unity.VisualScripting
+
+
+
