@@ -28,3 +28,11 @@
 
 
 
+\## \[1.1.2] - 2025-07-20
+
+\### Stable Version
+
+* Removed unnecessary class causing some issues
+
+
+
