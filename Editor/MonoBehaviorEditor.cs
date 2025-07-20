@@ -3,9 +3,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using CustomAttributes;
+using ReverseTowerDefense.Utils;
+using Unity.VisualScripting;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -16,45 +20,40 @@ namespace ReverseTowerDefense
     {
         public struct ListInfo
         {
-            public IList actualList;
-            public bool showList;
-            public FieldInfo field;
-            public Type fieldType;
-            public float heightPerElement;
-            public bool isHeightCalculated;
+            public IList ActualList;
+            public bool ShowList;
+            public string ListElementName;
+            public bool IsCustomDataTypeList;
 
-            public ListInfo(IList ActualList, bool ShowList, FieldInfo Field, Type FieldType)
+            public ListInfo(IList actualList, bool showList, string listElementName, bool isCustomDataTypeList)
             {
-                actualList = ActualList;
-                showList = ShowList;
-                field = Field;
-                fieldType = FieldType;
-                heightPerElement = 0f;
-
-                isHeightCalculated = false;
+                ActualList = actualList;
+                ShowList = showList;
+                ListElementName = listElementName;
+                IsCustomDataTypeList = isCustomDataTypeList;
             }
         }
 
         private static GUIStyle centeredBoldLabelStyle;
         private static GUIStyle boldLabelStyle;
+        private static GUIStyle boldFoldoutStyle;
 
-        #region Private Fields Handlers
+        // Contains the data of non-serialized as well as serialized lists
+        private Dictionary<FieldInfo, ListInfo> serializedLists;
+        private Dictionary<string, ReorderableList> nameToReorderableListsMap;
+        private Dictionary<FieldInfo, bool> customTypeFieldToFoldoutMap = new Dictionary<FieldInfo, bool>();
+        private Dictionary<string, bool> listElementFoldoutsMap = new Dictionary<string, bool>();
+
+        #region Debug Mode Handlers
 
         private bool isPreviewingAnything = false;
 
-        #region Private Fields Inspector Parameters
-
         private readonly string showPrivateStuffWithInstanceID = "Show Private Stuff_{0}";
         private Dictionary<FieldInfo, ListInfo> privateFieldToListMap = new Dictionary<FieldInfo, ListInfo>();
-        private Dictionary<FieldInfo, bool> customTypePrivateFieldsFoldoutMap = new Dictionary<FieldInfo, bool>();
         private List<FieldInfo> privateFieldsList;
         private bool showPrivateFields = false;
 
         private EditorDebugModeConfigSO editorDebugModeConfigSO;
-
-        #endregion
-
-        #region Helper Functions
 
         private void PopulateFields(BindingFlags bindingFlags, ref List<FieldInfo> fieldsList)
         {
@@ -70,85 +69,60 @@ namespace ReverseTowerDefense
 
                     if (IsFieldStructType(field.FieldType) || IsFieldCustomClassType(field.FieldType, field.GetValue(target)))
                     {
-                        customTypePrivateFieldsFoldoutMap.Add(field, false);
-                    }
-                }
-                else if (field.GetCustomAttribute<ReadonlyAttribute>() != null)
-                {
-                    fieldsList.Add(field);
-
-                    if (IsFieldStructType(field.FieldType) || IsFieldCustomClassType(field.FieldType, field.GetValue(target)))
-                    {
-                        customTypePrivateFieldsFoldoutMap.Add(field, false);
+                        customTypeFieldToFoldoutMap.Add(field, false);
                     }
                 }
             }
         }
 
-        private void DrawNonEditableFieldInEditor(string fieldName, Type fieldType, object value, FieldInfo fieldInfo)
-        {
-            DrawFieldInEditor(fieldName, fieldType, value, GUILayout.MaxWidth(1000f), out object newValue);
-
-            if (newValue == default && customTypePrivateFieldsFoldoutMap.ContainsKey(fieldInfo)) // Handle structs and classes
-            {
-                bool foldoutValue = customTypePrivateFieldsFoldoutMap[fieldInfo];
-
-                int numberOfFieldsInCustomType = GetNumberOfFieldsInCustomType(fieldType);
-                BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
-                FieldInfo[] customDataTypeFields = fieldType.GetFields(flags);
-
-                if (GetTotalWidthToBeOccupiedByCustomDataTypeFields(customDataTypeFields) > EditorGUIUtility.currentViewWidth - EditorGUIUtility.labelWidth - editorDebugModeConfigSO.ScrollbarWidth)
-                {
-                    DrawNonEditableCustomTypeWithFoldout(fieldName, fieldType, value, customDataTypeFields, ref foldoutValue);
-                }
-                else
-                {
-                    DrawNonEditableCustomTypeInline(fieldName, fieldType, value, customDataTypeFields);
-                }
-
-                customTypePrivateFieldsFoldoutMap[fieldInfo] = foldoutValue;
-            }
-        }
-
-        private int GetNumberOfFieldsInCustomType(Type customFieldType)
-        {
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-            return customFieldType.GetFields(flags).Length;
-        }
-
-        private void DrawNonEditableCustomTypeInline(string fieldName, Type fieldType, object value, FieldInfo[] customDataTypeFields)
+        private object DrawCustomTypeInline(string fieldName, object value, FieldInfo[] customDataTypeFields, bool isEditable)
         {
             EditorGUILayout.BeginHorizontal();
             EditorGUILayout.LabelField(fieldName, GUILayout.Width(EditorGUIUtility.labelWidth));
 
             foreach (FieldInfo field in customDataTypeFields)
             {
-                DrawCustomClassField(ObjectNames.NicifyVariableName(field.Name), field.FieldType, field.GetValue(value), field);
+                DrawCustomClassField(ObjectNames.NicifyVariableName(field.Name), field.FieldType, value, field, isEditable);
             }
 
             EditorGUILayout.EndHorizontal();
+
+            return value;
         }
 
-        private void DrawCustomClassField(string fieldName, Type fieldType, object value, FieldInfo fieldInfo)
+        private object DrawCustomClassField(string fieldName, Type fieldType, object value, FieldInfo fieldInfo, bool isEditable)
         {
             var style = new GUIStyle(GUI.skin.label);
 
             Vector2 size = style.CalcSize(new GUIContent(fieldName));
 
             EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField(fieldName, GUILayout.Width(size.x));
+            EditorGUILayout.LabelField(fieldName, GUILayout.Width(size.x + EditorGUI.indentLevel * 15f));
 
-            DrawFieldInEditor("", fieldType, value, GUILayout.MinWidth(GetWidthBasedOnTypeOfField(fieldType)), out object newValue);
+            DrawFieldInEditor("", fieldType, fieldInfo, fieldInfo.GetValue(value), GUILayout.MinWidth(GetWidthBasedOnTypeOfField(fieldType)), out object newValue);
+
+            if (isEditable)
+            {
+                fieldInfo.SetValue(value, newValue);
+            }
 
             EditorGUILayout.EndHorizontal();
+
+            return value;
         }
 
-        private void DrawNonEditableCustomTypeWithFoldout(string fieldName, Type fieldType, object value, FieldInfo[] customDataTypeFields, ref bool customTypeFoldout)
+        private object DrawCustomTypeWithFoldout(string fieldName, Type fieldType, object value, FieldInfo[] customDataTypeFields, bool isEditable, ref bool customTypeFoldout)
         {
-            GUI.enabled = true;
-            customTypeFoldout = EditorGUILayout.Foldout(customTypeFoldout, fieldName);
-            GUI.enabled = false;
+            if (isEditable)
+            {
+                customTypeFoldout = EditorGUILayout.Foldout(customTypeFoldout, fieldName);
+            }
+            else
+            {
+                GUI.enabled = true;
+                customTypeFoldout = EditorGUILayout.Foldout(customTypeFoldout, fieldName);
+                GUI.enabled = false;
+            }
 
             if (customTypeFoldout)
             {
@@ -156,96 +130,64 @@ namespace ReverseTowerDefense
 
                 foreach (FieldInfo customClassField in customDataTypeFields)
                 {
-                    DrawNonEditableFieldInEditor(ObjectNames.NicifyVariableName(customClassField.Name), customClassField.FieldType, customClassField.GetValue(value), customClassField);
+                    DrawFieldInEditor(ObjectNames.NicifyVariableName(customClassField.Name), customClassField.FieldType, customClassField, customClassField.GetValue(value), GUILayout.MaxWidth(1000f), out object newValue);
+
+                    if(isEditable)
+                    {
+                        customClassField.SetValue(value, newValue);
+                    }
                 }
 
                 EditorGUI.indentLevel--;
             }
+
+            return value;
         }
 
-        private void DrawFields(List<FieldInfo> listOfFieldsToDraw, Dictionary<FieldInfo, ListInfo> fieldToListMap)
+        private void DrawFields()
         {
-            foreach (FieldInfo readonlyField in listOfFieldsToDraw)
+            foreach (FieldInfo readonlyField in privateFieldsList)
             {
-                if (fieldToListMap.ContainsKey(readonlyField))
+                string fieldName = ObjectNames.NicifyVariableName(readonlyField.Name);
+
+                if (privateFieldToListMap.ContainsKey(readonlyField))
                 {
-                    ListInfo listInfo = fieldToListMap[readonlyField];
-                    DrawList(readonlyField, ref listInfo);
-                    fieldToListMap[readonlyField] = listInfo;
+                    ListInfo listInfo = privateFieldToListMap[readonlyField];
+
+                    DrawListInEditor(fieldName, readonlyField, readonlyField.FieldType, isEditable: false, ref listInfo, out object newValue);
+                    privateFieldToListMap[readonlyField] = listInfo;
 
                     continue;
                 }
 
-                string fieldName = ObjectNames.NicifyVariableName(readonlyField.Name);
                 object value = readonlyField.GetValue(target);
                 Type fieldType = readonlyField.FieldType;
 
                 if (fieldType.IsGenericType && fieldType.GetGenericTypeDefinition() == typeof(List<>))
                 {
                     IList list = value as IList;
-                    ListInfo newListInfo = new ListInfo(list, false, readonlyField, fieldType);
 
-                    DrawList(readonlyField, ref newListInfo);
+                    ListElementAttribute listElementAttribute = readonlyField.GetCustomAttribute<ListElementAttribute>();
+                    string elementName = "Element";
 
-                    fieldToListMap.Add(readonlyField, newListInfo);
+                    if(listElementAttribute != null)
+                    {
+                        elementName = listElementAttribute.ElementName;
+                    }
+
+                    Type listElementType = fieldType.GetGenericArguments()[0];
+                    bool isCustomDataTypeList = IsFieldCustomClassType(fieldType.GetGenericArguments()[0], value) || IsFieldStructType(listElementType);
+
+                    ListInfo newListInfo = new ListInfo(list, EditorPrefs.GetBool(ObjectNames.NicifyVariableName(readonlyField.Name), false), elementName, isCustomDataTypeList);
+
+                    privateFieldToListMap.Add(readonlyField, newListInfo);
                 }
 
                 GUI.enabled = false;
 
-                DrawNonEditableFieldInEditor(fieldName, fieldType, value, readonlyField);
+                DrawFieldInEditor(fieldName, fieldType, readonlyField, value, GUILayout.MaxWidth(1000f), out object _);
 
                 GUI.enabled = true;
-            }
-        }
-
-        private void DrawList(FieldInfo fieldInfo, ref ListInfo listInfo)
-        {
-            Vector2 scrollPosition = Vector2.zero;
-            IList list = listInfo.actualList;
-
-            Type elementType = listInfo.fieldType.GetGenericArguments()[0];
-
-            GUI.enabled = true;
-
-            EditorGUILayout.BeginHorizontal();
-
-            listInfo.showList = EditorGUILayout.Foldout(listInfo.showList, ObjectNames.NicifyVariableName(listInfo.field.Name));
-            int count = list == null ? 0 : list.Count;
-            GUI.enabled = false;
-
-            GUIStyle newStyle = new GUIStyle(GUI.skin.box);
-            newStyle.alignment = TextAnchor.MiddleCenter;
-            EditorGUILayout.IntField(count, newStyle, GUILayout.Width(20f));
-
-            EditorGUILayout.EndHorizontal();
-
-            if (listInfo.showList)
-            {
-                EditorGUI.indentLevel++;
-
-                if (list != null && list.Count > 0)
-                {
-                    scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, GUILayout.Height(100f));
-
-                    for (int i = 0; i < list.Count; i++)
-                    {
-                        object item = list[i];
-
-                        EditorGUILayout.BeginVertical(GUI.skin.box);
-
-                        DrawNonEditableFieldInEditor($"Element {i}", elementType, item, fieldInfo);
-
-                        EditorGUILayout.EndVertical();
-                    }
-
-                    GUILayout.EndScrollView();
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox("List is Empty!", MessageType.Info);
-                }
-
-                EditorGUI.indentLevel--;
             }
         }
 
@@ -257,8 +199,18 @@ namespace ReverseTowerDefense
 
                 if (showPrivateFields)
                 {
-                    DrawFields(privateFieldsList, privateFieldToListMap);
+                    DrawFields();
                 }
+
+                SaveListFoldoutPrefs();
+            }
+        }
+
+        private void SaveListFoldoutPrefs()
+        {
+            foreach(var pair in privateFieldToListMap)
+            {
+                EditorPrefs.SetBool(ObjectNames.NicifyVariableName(pair.Key.Name), pair.Value.ShowList);
             }
         }
 
@@ -300,87 +252,6 @@ namespace ReverseTowerDefense
             HandlePrivateFields();
 
             EditorPrefs.SetBool(privateValue, showPrivateFields);
-        }
-
-        private bool IsFieldStructType(Type fieldType)
-        {
-            return (fieldType.IsValueType && !fieldType.IsPrimitive); // Structs
-        }
-
-        private bool IsFieldCustomClassType(Type fieldType, object value)
-        {
-            return (fieldType.IsClass && value != null);
-        }
-
-        #endregion
-
-        #endregion
-
-        #region ShowIf Attribute 
-
-        private List<FieldInfo> showIfFieldsList;
-
-        private void PopulateShowIfFields()
-        {
-            showIfFieldsList = new List<FieldInfo>();
-
-            Type type = target.GetType();
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-
-            foreach (FieldInfo field in type.GetFields(flags))
-            {
-                if (field.GetCustomAttribute<ShowIfAttribute>() != null)
-                {
-                    showIfFieldsList.Add(field);
-                }
-            }
-        }
-
-        private void DrawShowIfFields()
-        {
-            foreach (FieldInfo field in showIfFieldsList)
-            {
-                ShowIfAttribute showIfAttribute = field.GetCustomAttribute<ShowIfAttribute>();
-
-                if (showIfAttribute == null) continue;
-
-                string conditionFieldName = showIfAttribute.ConditionFieldName;
-                object conditionFieldValue = showIfAttribute.ConditionFieldValue;
-
-                Type type = target.GetType();
-
-                FieldInfo conditionField = type.GetField(conditionFieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-                if (conditionField == null)
-                {
-                    this.LogError($"Condition field with the name \"{conditionFieldName}\" Doesn't exist! \n Check if you have typed the name properly in the class!");
-
-                    continue;
-                }
-                else if (conditionField.FieldType != conditionFieldValue.GetType())
-                {
-                    this.LogError($"The condition field value is of type {conditionFieldValue.GetType().Name}, which doesn't match with type {conditionField.FieldType.Name} of the condition field \"{conditionFieldName}\""!);
-
-                    continue;
-                }
-
-                if (conditionField.GetValue(target).ToString() == conditionFieldValue.ToString())
-                {
-                    DrawFieldInEditor(ObjectNames.NicifyVariableName(field.Name), field.FieldType, field.GetValue(target), GUILayout.MaxWidth(1000f), out object newValue);
-
-                    field.SetValue(target, newValue);
-                }
-            }
-        }
-
-        private void HandleShowIfFields()
-        {
-            if (showIfFieldsList == null)
-            {
-                PopulateShowIfFields();
-            }
-
-            DrawShowIfFields();
         }
 
         #endregion
@@ -521,9 +392,184 @@ namespace ReverseTowerDefense
 
         #endregion
 
-        #region Main Helper Functions
+        #region Foldouts Handler Functions
 
-        private void DrawFieldInEditor(string fieldName, Type fieldType, object value, GUILayoutOption guiLayoutOption, out object newValue)
+        private Dictionary<FoldoutInfo, bool> foldoutInfoMap;
+        private List<FieldInfo> serializeFields;
+
+        private void HandleFoldouts()
+        {
+            if (foldoutInfoMap == null || serializeFields == null)
+            {
+                PopulateFoldouts();
+            }
+
+            DrawFoldouts();
+
+            SaveEditorPrefsForFoldouts();
+            SaveEditorPrefsForSerializedLists();
+        }
+
+        private void SaveEditorPrefsForFoldouts()
+        {
+            foreach (var foldoutInfo in foldoutInfoMap)
+            {
+                EditorPrefs.SetBool($"{foldoutInfo.Key.Label} {ObjectNames.NicifyVariableName(target.name)}", foldoutInfo.Value);
+            }
+        }
+
+        private void SaveEditorPrefsForSerializedLists()
+        {
+            foreach (var pair in serializedLists)
+            {
+                EditorPrefs.SetBool(ObjectNames.NicifyVariableName(pair.Key.Name), pair.Value.ShowList);
+            }
+        }
+
+        private void DrawFoldouts()
+        {
+            if (foldoutInfoMap.Count == 0) return;
+
+            int currentFoldoutIndex = 0;
+            FoldoutInfo currentFoldoutInfo = foldoutInfoMap.First().Key;
+
+            int foldoutStartIndex = currentFoldoutInfo.StartIndex;
+            int foldoutEndIndex = currentFoldoutInfo.EndIndex;
+            string foldoutLabel = currentFoldoutInfo.Label;
+
+            int i = 0;
+
+            while (i < serializeFields.Count)
+            {
+                FieldInfo fieldInfo = serializeFields[i];
+
+                if (i == foldoutStartIndex)
+                {
+                    bool foldout = EditorGUILayout.Foldout(foldoutInfoMap[currentFoldoutInfo], foldoutLabel, toggleOnLabelClick: true, boldFoldoutStyle);
+
+                    if (foldout)
+                    {
+                        EditorGUI.indentLevel++;
+
+                        while (i >= foldoutStartIndex && i <= foldoutEndIndex)
+                        {
+                            fieldInfo = serializeFields[i];
+                            DrawSerializedField(fieldInfo);
+
+                            i += 1;
+                        }
+
+                        EditorGUI.indentLevel--;
+                    }
+
+                    currentFoldoutIndex += 1;
+                    foldoutInfoMap[currentFoldoutInfo] = foldout;
+
+                    currentFoldoutInfo = GetCurrentFoldoutInfoFromMap(currentFoldoutIndex);
+                    i = foldoutEndIndex + 1;
+
+                    foldoutStartIndex = currentFoldoutInfo.StartIndex;
+                    foldoutEndIndex = currentFoldoutInfo.EndIndex;
+                    foldoutLabel = currentFoldoutInfo.Label;
+                }
+                else
+                {
+                    i += 1;
+                }
+            }
+        }
+
+        private void DrawSerializedField(FieldInfo fieldInfo)
+        {
+            HandleFieldAsShowIfField(fieldInfo, out bool canDraw);
+
+            if (canDraw)
+            {
+                DrawFieldInEditor(ObjectNames.NicifyVariableName(fieldInfo.Name), fieldInfo.FieldType, fieldInfo, fieldInfo.GetValue(target), GUILayout.MaxWidth(1000f), out object newValue);
+
+                fieldInfo.SetValue(target, newValue);
+            }
+        }
+
+        private FoldoutInfo GetCurrentFoldoutInfoFromMap(int currentFoldoutIndex)
+        {
+            int currentIteration = 0;
+            foreach (var mapPair in foldoutInfoMap)
+            {
+                if (currentFoldoutIndex == currentIteration)
+                {
+                    return mapPair.Key;
+                }
+                currentIteration += 1;
+            }
+
+            return new FoldoutInfo();
+        }
+
+        private void PopulateFoldouts()
+        {
+            serializedLists = new Dictionary<FieldInfo, ListInfo>();
+            nameToReorderableListsMap = new Dictionary<string, ReorderableList>();
+
+            foldoutInfoMap = new Dictionary<FoldoutInfo, bool>();
+            serializeFields = new List<FieldInfo>();
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+
+            Type type = target.GetType();
+            FieldInfo[] fields = type.GetFields(flags);
+            serializeFields = fields.Where(field => field.GetCustomAttribute<SerializeField>() != null).ToList();
+
+            int currentFoldoutStartIndex = 0;
+            string currentFoldoutLabel = "Serialized Fields";
+
+            for (int i = 0; i < serializeFields.Count; i++)
+            {
+                FieldInfo field = serializeFields[i];
+                Type fieldType = field.FieldType;
+                object value = field.GetValue(target);
+
+                if (field.GetCustomAttribute<BeginFoldoutAttribute>() != null)
+                {
+                    if (i != 0)
+                    {
+                        foldoutInfoMap.Add(new FoldoutInfo(currentFoldoutStartIndex, i - 1, currentFoldoutLabel), EditorPrefs.GetBool($"{currentFoldoutLabel} {ObjectNames.NicifyVariableName(target.name)}", false));
+                    }
+
+                    currentFoldoutLabel = field.GetCustomAttribute<BeginFoldoutAttribute>().FoldoutName;
+                    currentFoldoutStartIndex = i;
+                }
+
+                if (fieldType.IsGenericType && fieldType.GetGenericTypeDefinition() == typeof(List<>))
+                {
+                    ListElementAttribute listElementAttribute = field.GetCustomAttribute<ListElementAttribute>();
+                    string elementName = "Element";
+
+                    if (listElementAttribute != null)
+                    {
+                        elementName = listElementAttribute.ElementName;
+                    }
+
+                    Type listElementType = fieldType.GetGenericArguments()[0];
+                    bool isCustomDataTypeList = IsFieldCustomClassType(fieldType.GetGenericArguments()[0], value) || IsFieldStructType(listElementType);
+
+                    serializedLists.Add(field, new ListInfo(field.GetValue(target) as IList, EditorPrefs.GetBool(ObjectNames.NicifyVariableName(field.Name), false), elementName, isCustomDataTypeList));
+                }
+
+                if (IsFieldStructType(field.FieldType) || IsFieldCustomClassType(field.FieldType, field.GetValue(target)))
+                {
+                    customTypeFieldToFoldoutMap.Add(field, false);
+                }
+            }
+
+            foldoutInfoMap.Add(new FoldoutInfo(currentFoldoutStartIndex, serializeFields.Count - 1, currentFoldoutLabel), EditorPrefs.GetBool($"{currentFoldoutLabel} {ObjectNames.NicifyVariableName(target.name)}", false));
+        }
+
+        #endregion
+
+        #region Helper Functions
+
+        private void DrawFieldInEditor(string fieldName, Type fieldType, FieldInfo fieldInfo, object value, GUILayoutOption guiLayoutOption, out object newValue)
         {
             newValue = default;
             if (fieldType == typeof(string))
@@ -550,6 +596,645 @@ namespace ReverseTowerDefense
             {
                 newValue = EditorGUILayout.EnumPopup(fieldName, (Enum)value, guiLayoutOption);
             }
+            else if(fieldType == typeof(AnimationCurve))
+            {
+                newValue = EditorGUILayout.CurveField(fieldName, (AnimationCurve)value, guiLayoutOption);
+            }
+            else if(fieldType == typeof(Vector3))
+            {
+                newValue = EditorGUILayout.Vector3Field(fieldName, (Vector3)value, guiLayoutOption);
+            }
+            else if (fieldType == typeof(Vector2))
+            {
+                newValue = EditorGUILayout.Vector2Field(fieldName, (Vector2)value, guiLayoutOption);
+            }
+            else if (fieldType == typeof(Vector4))
+            {
+                newValue = EditorGUILayout.Vector4Field(fieldName, (Vector4)value, guiLayoutOption);
+            }
+            else if(fieldType == typeof(LayerMask))
+            {
+                List<string> layerNames = GetLayerNames();
+                List<int> layerNumbers = GetLayerNumbers();
+
+                LayerMask layerMask = (LayerMask)value;
+                int mask = layerMask.value;
+
+                int displayMask = 0;
+                for (int i = 0; i < layerNumbers.Count; i++)
+                {
+                    if (((1 << layerNumbers[i]) & mask) != 0)
+                    {
+                        displayMask |= (1 << i);
+                    }
+                }
+                displayMask = EditorGUILayout.MaskField(fieldName, displayMask, layerNames.ToArray());
+
+                int newMask = 0;
+
+                for (int i = 0; i < layerNumbers.Count; i++)
+                {
+                    if ((displayMask & (1 << i)) != 0)
+                    {
+                        newMask |= (1 << layerNumbers[i]);
+                    }
+                }
+
+                newValue = (LayerMask)(newMask);
+            }
+            else if(fieldType == typeof(Color))
+            {
+                ColorUsageAttribute colorUsageAttribute = fieldInfo.GetCustomAttribute<ColorUsageAttribute>();
+
+                bool showEyeDropper = true;
+                bool showHdr = false;
+                bool showAlpha = false;
+
+                if(colorUsageAttribute != null)
+                {
+                    showHdr = colorUsageAttribute.hdr;
+                    showAlpha = colorUsageAttribute.showAlpha;
+                }
+                GUIContent label = new GUIContent(fieldName);
+                newValue = EditorGUILayout.ColorField(label, (Color)value, showEyeDropper, showAlpha, showHdr, guiLayoutOption);
+            }
+
+            else if(serializedLists.ContainsKey(fieldInfo))
+            {
+                ListInfo listInfo = serializedLists[fieldInfo];
+                DrawListInEditor(fieldName, fieldInfo, fieldType, isEditable: true, ref listInfo, out newValue);
+                serializedLists[fieldInfo] = listInfo;
+            }
+            else if(customTypeFieldToFoldoutMap.ContainsKey(fieldInfo))
+            {
+                bool foldoutValue = customTypeFieldToFoldoutMap[fieldInfo];
+
+                BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
+                FieldInfo[] customDataTypeFields = fieldType.GetFields(flags);
+
+                if (GetTotalWidthToBeOccupiedByCustomDataTypeFields(customDataTypeFields) > EditorGUIUtility.currentViewWidth - EditorGUIUtility.labelWidth - editorDebugModeConfigSO.ScrollbarWidth)
+                {
+                    newValue = DrawCustomTypeWithFoldout(fieldName, fieldType, value, customDataTypeFields, isEditable: true, ref foldoutValue);
+                }
+                else
+                {
+                    newValue = DrawCustomTypeInline(fieldName, value, customDataTypeFields, isEditable: true);
+                }
+
+                customTypeFieldToFoldoutMap[fieldInfo] = foldoutValue;
+            }
+        }
+
+        private List<string> GetLayerNames()
+        {
+            List<string> layerNames = new List<string>();
+            for (int i = 0; i < 32; i++)
+            {
+                string name = LayerMask.LayerToName(i);
+                if (!string.IsNullOrEmpty(name))
+                {
+                    layerNames.Add(name);
+                }
+            }
+            return layerNames;
+        }
+
+        private List<int> GetLayerNumbers()
+        {
+            List<int> layerNumbers = new List<int>();
+            for (int i = 0; i < 32; i++)
+            {
+                string name = LayerMask.LayerToName(i);
+
+                if (!string.IsNullOrEmpty(name))
+                {
+                    layerNumbers.Add(i);
+                }
+            }
+            return layerNumbers;
+        }
+
+        private void DrawListInEditor(string fieldName, FieldInfo fieldInfo, Type listType, bool isEditable, ref ListInfo listInfo, out object newValue)
+        {
+            Type elementType = listType.GetGenericArguments()[0];
+            IList list = listInfo.ActualList;
+
+            if (list == null)
+            {
+                var listElementType = typeof(List<>).MakeGenericType(elementType);
+                list = (IList)Activator.CreateInstance(listElementType);
+                fieldInfo.SetValue(target, list);
+            }
+
+            bool listFoldout = false;
+
+            // We will define all the callbacks of the reorderable list when it's being drawn for the first time
+            if (!nameToReorderableListsMap.ContainsKey(fieldName))
+            {
+                ReorderableList reorderableList = new ReorderableList(list, elementType, draggable: isEditable, displayHeader: false, displayAddButton: isEditable, displayRemoveButton: isEditable);
+
+                for(int i = 0; i < list.Count; i++)
+                {
+                    string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, i);
+                    listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                }
+
+                AssignCallbacksToReorderableList(listInfo, fieldInfo, elementType, listInfo.ListElementName, reorderableList, isEditable);    
+
+                nameToReorderableListsMap[fieldName] = reorderableList;
+            }
+
+            // Draw List based on foldout
+            EditorGUILayout.BeginHorizontal();
+
+            listFoldout = EditorGUILayout.Foldout(listInfo.ShowList, ObjectNames.NicifyVariableName(fieldInfo.Name), toggleOnLabelClick: true, boldFoldoutStyle);
+
+            GUIStyle newStyle = new GUIStyle(GUI.skin.box);
+            newStyle.alignment = TextAnchor.MiddleCenter;
+
+            if (isEditable)
+            {
+                EditorGUI.BeginChangeCheck();
+
+                Undo.RecordObject(target, "Modifying List Count");
+                int count = EditorGUILayout.IntField(list.Count, GUILayout.Width(60f));
+
+                if (EditorGUI.EndChangeCheck())
+                {
+                    while (count > list.Count)
+                    {
+                        Undo.RecordObject(target, "Add Element");
+                        var defaultValue = elementType.IsValueType ? Activator.CreateInstance(elementType) : null;
+                        list.Add(defaultValue);
+                        EditorUtility.SetDirty(target);
+                    }
+
+                    while (count < list.Count)
+                    {
+                        Undo.RecordObject(target, "Remove Element");
+                        list.RemoveAt(list.Count - 1);
+                        EditorUtility.SetDirty(target);
+                    }
+                }
+            }
+            else
+            {
+                GUI.enabled = false;
+                EditorGUILayout.IntField(list.Count, GUILayout.Width(60f));
+                GUI.enabled = true;
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(5f);
+
+            // if the foldout is pressed, draw the list
+            if (listFoldout)
+            {
+                // This is from where the list starts to draw
+                nameToReorderableListsMap[fieldName].DoLayoutList();
+
+                ReorderableList reorderableList = nameToReorderableListsMap[fieldName];
+
+                CheckForDragAndDropInList(ref reorderableList);
+
+                nameToReorderableListsMap[fieldName] = reorderableList;
+            }
+
+            listInfo.ActualList = nameToReorderableListsMap[fieldName].list;
+            listInfo.ShowList = listFoldout;
+
+            newValue = list;
+        }
+
+        private void AssignCallbacksToReorderableList(ListInfo listInfo, FieldInfo fieldInfo, Type elementType, string elementName, ReorderableList reorderableList, bool isEditable)
+        {
+            // This is the callback that will be called when the list's header will be drawn
+            reorderableList.drawHeaderCallback = rect =>
+            {
+            };
+
+            // This is the callback that will be called when drawing an element
+            reorderableList.drawElementCallback = (listRect, index, isActive, isFocused) =>
+            {
+                object element = listInfo.ActualList[index];
+
+                // This will draw the list element based on the rect that is passed to the function
+                string listElementKey = GetListElementNameInDictionary(fieldInfo, listInfo, index);
+                object newValue = default;
+
+                if (isEditable)
+                {
+                    newValue = DrawListElement(fieldInfo, listRect, element, elementType, $"{elementName} {index}", listElementKey);
+                }
+                else
+                {
+                    GUI.enabled = false;
+                    DrawListElement(fieldInfo, listRect, element, elementType, $"{elementName} {index}", listElementKey);
+                    GUI.enabled = true;
+                }
+                
+                if (isEditable)
+                {
+                    listInfo.ActualList[index] = newValue;
+                    EditorUtility.SetDirty(target);
+                }
+            };
+
+            reorderableList.onReorderCallback = list =>
+            {
+                ResetFoldoutDataForList(list, fieldInfo, listInfo, fieldInfo.Name);
+            };
+
+            reorderableList.elementHeightCallback = index =>
+            {
+                string elementKey = GetListElementNameInDictionary(fieldInfo, listInfo, index);
+                if (listElementFoldoutsMap.TryGetValue(elementKey, out bool value) && value)
+                {
+                    float lineHeight = EditorGUIUtility.singleLineHeight + 10f;
+                    return lineHeight * elementType.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic).Length;
+                }
+                else
+                {
+                    return EditorGUIUtility.singleLineHeight;
+                }
+            };
+
+            // Callback when you add something to the list
+            reorderableList.onAddCallback = reorderableList =>
+            {
+                object defaultValue = elementType.IsValueType ? Activator.CreateInstance(elementType) : null;
+
+                if(reorderableList.count > 0)
+                {
+                    defaultValue = reorderableList.list[^1];
+                }
+                Undo.RecordObject(target, "Add Element");
+                listInfo.ActualList.Add(defaultValue);
+
+                if(listInfo.IsCustomDataTypeList)
+                {
+                    string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, listInfo.ActualList.Count - 1);
+                    listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                }
+
+                EditorUtility.SetDirty(target);
+            };
+
+            // Callback when you remove something from the list
+            reorderableList.onRemoveCallback = rl =>
+            {
+                Undo.RecordObject(target, "Remove Element");
+                listInfo.ActualList.RemoveAt(rl.index);
+
+                ResetFoldoutDataForList(reorderableList, fieldInfo, listInfo, fieldInfo.Name);
+
+                EditorUtility.SetDirty(target);
+            };
+        }
+
+        private void HandleFieldAsShowIfField(FieldInfo field, out bool canDraw)
+        {
+            ShowIfAttribute showIfAttribute = field.GetCustomAttribute<ShowIfAttribute>();
+
+            if (showIfAttribute == null)
+            {
+                canDraw = true;
+                return;
+            }
+
+            string conditionFieldName = showIfAttribute.ConditionFieldName;
+            object conditionFieldValue = showIfAttribute.ConditionFieldValue;
+
+            Type type = target.GetType();
+
+            FieldInfo conditionField = type.GetField(conditionFieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (conditionField == null)
+            {
+                this.LogError($"Condition field with the name \"{conditionFieldName}\" Doesn't exist! \n Check if you have typed the name properly in the class!");
+
+                canDraw = false;
+                return;
+            }
+            else if (conditionField.FieldType != conditionFieldValue.GetType())
+            {
+                this.LogError($"The condition field value is of type {conditionFieldValue.GetType().Name}, which doesn't match with type {conditionField.FieldType.Name} of the condition field \"{conditionFieldName}\""!);
+
+                canDraw = false;
+                return;
+            }
+
+            canDraw = conditionField.GetValue(target).ToString() == conditionFieldValue.ToString();
+        }
+
+        private void ResetFoldoutDataForList(ReorderableList reorderableList, FieldInfo fieldInfo, ListInfo listInfo, string listPrefix)
+        {
+            RemoveAllKeysWithPrefix(listPrefix);
+
+            for(int i = 0; i < reorderableList.list.Count; i++)
+            {
+                string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, i);
+
+                listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                EditorPrefs.SetBool(elementNameInDictionary, false);
+            }
+        }
+
+        private void RemoveAllKeysWithPrefix(string listPrefix)
+        {
+            List<string> keysToRemove = new List<string>();
+            Dictionary<string, bool> tempFoldoutsMap = new Dictionary<string ,bool>();
+
+            foreach(var pair in listElementFoldoutsMap)
+            {
+                if(!pair.Key.Contains(listPrefix))
+                {
+                    tempFoldoutsMap.Add(pair.Key, pair.Value);
+                }
+            }
+            listElementFoldoutsMap = new Dictionary<string, bool>(tempFoldoutsMap);
+        }
+
+        private string GetListElementNameInDictionary(FieldInfo fieldInfo, ListInfo listInfo, int index)
+        {
+            return $"{fieldInfo.Name}_{listInfo.ListElementName}_{index}";
+        }
+
+        private void CheckForDragAndDropInList(ref ReorderableList reorderableList)
+        {
+            Rect dropArea = GUILayoutUtility.GetLastRect();
+            Event evt = Event.current;
+
+            if ((evt.type == EventType.DragUpdated || evt.type == EventType.DragPerform) && dropArea.Contains(evt.mousePosition))
+            {
+                Type elementType = reorderableList.list.GetType().GetGenericArguments()[0];
+
+                if (elementType.IsPrimitive) return;
+
+                bool canDrop = true;
+                foreach (Object droppingObject in DragAndDrop.objectReferences)
+                {
+                    if (droppingObject.GameObject() && IsTypeInheritingFromMonoBehaviourOrScriptableObject(elementType))
+                    {
+                        Component component = droppingObject.GameObject().GetComponent(elementType);
+
+                        if (component == null)
+                        {
+                            canDrop = false;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        if (droppingObject.GetType() != elementType)
+                        {
+                            canDrop = false;
+                            break;
+                        }
+                    }
+                }
+
+                DragAndDrop.visualMode = canDrop ? DragAndDropVisualMode.Copy : DragAndDropVisualMode.Rejected;
+
+                if (evt.type == EventType.DragPerform && canDrop)
+                {
+                    DragAndDrop.AcceptDrag();
+                    foreach (Object droppedObject in DragAndDrop.objectReferences)
+                    {
+                        if (droppedObject.GameObject())
+                        {
+                            reorderableList.list.Add(droppedObject.GameObject().GetComponent(elementType));
+                        }
+                        else
+                        {
+                            reorderableList.list.Add(droppedObject);
+                        }
+                    }
+                    EditorUtility.SetDirty(target);
+                }
+
+                evt.Use();
+            }
+        }
+
+        private object DrawListElement(FieldInfo fieldInfo, Rect rect, object element, Type elementType, string elementName, string elementNameInDictionary)
+        {
+            object newValue = default;
+
+            var style = new GUIStyle(GUI.skin.label);
+
+            float labelWidth = EditorGUIUtility.labelWidth;
+
+            Rect labelRect = new Rect(rect.x, rect.y, labelWidth, EditorGUIUtility.singleLineHeight);
+            Rect fieldRect = new Rect(rect.x + labelWidth, rect.y, rect.width - labelWidth, EditorGUIUtility.singleLineHeight);
+
+            if (!IsFieldCustomClassType(elementType, element) && !IsFieldStructType(elementType))
+            {
+                if (elementName != "")
+                {
+                    EditorGUI.LabelField(labelRect, elementName);
+                }
+
+                if (elementType == typeof(string))
+                {
+                    newValue = EditorGUI.TextField(fieldRect, element?.ToString() ?? "");
+                }
+                else if (elementType == typeof(int))
+                {
+                    int value = element != null ? (int)element : 0;
+                    DraggableIntField(fieldRect, ref value);
+                    newValue = value;
+                }
+                else if (elementType == typeof(float))
+                {
+                    float value = element != null ? (float)element : 0f;
+                    DraggableFloatField(fieldRect, ref value);
+                    newValue = value;
+                }
+                else if (typeof(Object).IsAssignableFrom(elementType))
+                {
+                    newValue = EditorGUI.ObjectField(fieldRect, (Object)element, elementType, true);
+                }
+                else if (elementType.IsEnum)
+                {
+                    newValue = EditorGUI.EnumPopup(fieldRect, (Enum)element);
+                }
+                else if (elementType == typeof(AnimationCurve))
+                {
+                    newValue = EditorGUI.CurveField(fieldRect, (AnimationCurve)element);
+                }
+                else if (elementType == typeof(Vector3))
+                {
+                    newValue = EditorGUI.Vector3Field(fieldRect, "", (Vector3)element);
+                }
+                else if (elementType == typeof(Vector2))
+                {
+                    newValue = EditorGUI.Vector2Field(fieldRect, "", (Vector2)element);
+                }
+                else if (elementType == typeof(Vector4))
+                {
+                    newValue = EditorGUI.Vector4Field(fieldRect, "", (Vector4)element);
+                }
+                else if (elementType == typeof(LayerMask))
+                {
+                    List<string> layerNames = GetLayerNames();
+                    List<int> layerNumbers = GetLayerNumbers();
+
+                    LayerMask layerMask = (LayerMask)element;
+                    int mask = layerMask.value;
+
+                    int displayMask = 0;
+                    for (int i = 0; i < layerNumbers.Count; i++)
+                    {
+                        if (((1 << layerNumbers[i]) & mask) != 0)
+                        {
+                            displayMask |= (1 << i);
+                        }
+                    }
+                    displayMask = EditorGUI.MaskField(fieldRect, displayMask, layerNames.ToArray());
+
+                    int newMask = 0;
+
+                    for (int i = 0; i < layerNumbers.Count; i++)
+                    {
+                        if ((displayMask & (1 << i)) != 0)
+                        {
+                            newMask |= (1 << layerNumbers[i]);
+                        }
+                    }
+
+                    newValue = (LayerMask)(newMask);
+                }
+                else if (elementType == typeof(Color))
+                {
+                    ColorUsageAttribute colorUsageAttribute = fieldInfo.GetCustomAttribute<ColorUsageAttribute>();
+
+                    bool showEyeDropper = true;
+                    bool showHdr = false;
+                    bool showAlpha = false;
+
+                    if (colorUsageAttribute != null)
+                    {
+                        showHdr = colorUsageAttribute.hdr;
+                        showAlpha = colorUsageAttribute.showAlpha;
+                    }
+                    GUIContent label = new GUIContent("");
+                    newValue = EditorGUI.ColorField(fieldRect, label, (Color)element, showEyeDropper, showAlpha, showHdr);
+                }
+            }
+            else if (IsFieldCustomClassType(elementType, element) || IsFieldStructType(elementType))
+            {
+                newValue = DrawCustomDataTypeInList(rect, elementType, element, elementName, elementNameInDictionary);
+            }
+
+            return newValue;
+        }
+
+        private float GetDraggableCursorDelta(Rect rect)
+        {
+            EditorGUILayout.BeginHorizontal();
+
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.SlideArrow);
+
+            int controlID = GUIUtility.GetControlID(FocusType.Passive, rect);
+
+            float value = 0f;
+            Event evt = Event.current;
+
+            switch (evt.GetTypeForControl(controlID))
+            {
+                case EventType.MouseDown:
+                    if (rect.Contains(evt.mousePosition) && evt.button == 0)
+                    {
+                        GUIUtility.hotControl = controlID;
+                        evt.Use();
+                    }
+                    break;
+
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl == controlID)
+                    {
+                        float delta = evt.delta.x;
+                        value += Mathf.RoundToInt(delta);
+                        evt.Use();
+                    }
+                    break;
+
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl == controlID)
+                    {
+                        GUIUtility.hotControl = 0;
+                        evt.Use();
+                    }
+                    break;
+            }
+
+            return value;
+        }
+
+        private void DraggableFloatField(Rect rect, ref float value)
+        {
+            Rect draggableRect = new Rect(rect.x, rect.y, 40f, EditorGUIUtility.singleLineHeight);
+            float delta = GetDraggableCursorDelta(draggableRect);
+
+            value += (delta);
+            value = EditorGUI.FloatField(rect, value);
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DraggableIntField(Rect rect, ref int value)
+        {
+            Rect draggableRect = new Rect(rect.x, rect.y, 40f, EditorGUIUtility.singleLineHeight);
+            float delta = GetDraggableCursorDelta(draggableRect);
+
+            value += Mathf.RoundToInt(delta);
+            value = EditorGUI.IntField(rect, value);
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private object DrawCustomDataTypeInList(Rect rect, Type fieldType, object element, string elementName, string elementNameInDictionary)
+        {
+            bool foldoutValue = false;
+
+            if (listElementFoldoutsMap.ContainsKey(elementNameInDictionary))
+            {
+                foldoutValue = listElementFoldoutsMap[elementNameInDictionary];
+            }
+            BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo[] customDataTypeFields = fieldType.GetFields(flags);
+
+            EditorGUI.indentLevel++;
+
+            float originalWidth = rect.height;
+            rect.height = EditorGUIUtility.singleLineHeight;
+            foldoutValue = EditorGUI.Foldout(rect, foldoutValue, ObjectNames.NicifyVariableName(elementName), toggleOnLabelClick: true);
+
+            rect.height = originalWidth;
+
+            if (foldoutValue)
+            {
+                EditorGUI.indentLevel++;
+                for(int i = 0; i < customDataTypeFields.Length; i++)
+                {
+                    FieldInfo customDataTypeField = customDataTypeFields[i];
+
+                    Rect newRect = new Rect(rect.x, rect.y + (i + 1) * 20f, rect.width, rect.height);
+
+                    object value = customDataTypeField.GetValue(element);
+                    object newValue = DrawListElement(customDataTypeField, newRect, value, customDataTypeField.FieldType, ObjectNames.NicifyVariableName(customDataTypeField.Name), "");
+
+                    customDataTypeField.SetValue(element, newValue);
+                }
+                EditorGUI.indentLevel--;
+            }
+
+            EditorGUI.indentLevel--;
+            listElementFoldoutsMap[elementNameInDictionary] = foldoutValue;
+            EditorPrefs.SetBool(elementNameInDictionary, foldoutValue);
+            return element;
         }
 
         private float GetTotalWidthToBeOccupiedByCustomDataTypeFields(FieldInfo[] customDataTypeFields)
@@ -592,17 +1277,36 @@ namespace ReverseTowerDefense
             }
         }
 
-        #endregion
-
-        public override void OnInspectorGUI()
+        private bool IsFieldStructType(Type fieldType)
         {
-            DrawDefaultInspector();
+            return (!fieldType.Namespace.Contains("UnityEngine") && fieldType.IsValueType && !fieldType.IsPrimitive && !fieldType.IsEnum); // Structs
+        }
 
-            if (editorDebugModeConfigSO == null)
-            {
-                editorDebugModeConfigSO = AssetDatabase.LoadAssetAtPath<EditorDebugModeConfigSO>("Assets/CustomAttributes/Config File/Editor Debug Mode Config.asset");
-            }
+        private bool IsFieldCustomClassType(Type fieldType, object value)
+        {
+            return (!fieldType.Namespace.Contains("UnityEngine") && fieldType.IsClass && value != null && !IsTypeInheritingFromMonoBehaviourOrScriptableObject(fieldType));
+        }
 
+        private bool IsTypeInheritingFromMonoBehaviourOrScriptableObject(Type fieldType)
+        {
+            return typeof(MonoBehaviour).IsAssignableFrom(fieldType) || typeof(ScriptableObject).IsAssignableFrom(fieldType);
+        }
+
+        private void DrawScriptObject()
+        {
+            EditorGUI.BeginDisabledGroup(true);
+
+            var monoScript = (target as MonoBehaviour) != null
+                ? MonoScript.FromMonoBehaviour((MonoBehaviour)target)
+                : MonoScript.FromScriptableObject((ScriptableObject)target);
+
+            EditorGUILayout.ObjectField("Script", monoScript, GetType(), false);
+
+            EditorGUI.EndDisabledGroup();
+        }
+
+        private void AssignGUIStyles()
+        {
             if (centeredBoldLabelStyle == null)
             {
                 centeredBoldLabelStyle = new GUIStyle(GUI.skin.label);
@@ -616,9 +1320,38 @@ namespace ReverseTowerDefense
                 boldLabelStyle.fontStyle = FontStyle.Bold;
             }
 
-            HandleShowIfFields();
-            HandleButtonMethods();
+            if (boldFoldoutStyle == null)
+            {
+                boldFoldoutStyle = new GUIStyle(EditorStyles.foldout);
+                boldFoldoutStyle.fontStyle = FontStyle.Bold;
+            }
+        }
 
+        #endregion
+
+        public override void OnInspectorGUI()
+        {
+            DrawScriptObject();
+
+            if (editorDebugModeConfigSO == null)
+            {
+                editorDebugModeConfigSO = AssetDatabase.LoadAssetAtPath<EditorDebugModeConfigSO>("Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
+
+                if(editorDebugModeConfigSO == null)
+                {
+                    editorDebugModeConfigSO = CreateInstance<EditorDebugModeConfigSO>();
+
+                    AssetDatabase.CreateFolder("Assets", "Custom Attributes Config");
+                    AssetDatabase.CreateAsset(editorDebugModeConfigSO, "Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
+
+                    AssetDatabase.SaveAssets();
+                }
+            }
+
+            AssignGUIStyles();
+
+            HandleFoldouts();
+            HandleButtonMethods();
             HandleDebugMode();
 
             if (GUI.changed)
