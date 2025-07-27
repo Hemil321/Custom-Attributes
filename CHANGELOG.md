@@ -36,3 +36,9 @@
 
 
 
+\## \[1.2.0] - 2025-07-27
+
+\### Inherited Classes Support
+
+* Added support for drawing private fields of base class in inherited class
+* Fixed a bug that didn't let users assign an object from the scene to something in the inspector

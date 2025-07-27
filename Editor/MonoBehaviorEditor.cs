@@ -1,6 +1,7 @@
-#if UNITY_EDITOR
+﻿#if UNITY_EDITOR
 
 using System;
+using System.CodeDom;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,6 +9,7 @@ using System.Reflection;
 using CustomAttributes;
 using Unity.VisualScripting;
 using UnityEditor;
+using UnityEditor.EditorTools;
 using UnityEditorInternal;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -33,6 +35,22 @@ namespace ReverseTowerDefense
             }
         }
 
+        public struct DictionaryInfo
+        {
+            public IDictionary ActualDictionary;
+            public bool ShowDictionary;
+            public string ElementName;
+            public bool IsCustomDataTypeDictionary;
+
+            public DictionaryInfo(IDictionary actualDictionary, bool showDictionary, string dictionaryElementName, bool isCustomDataTypeDictionary)
+            {
+                ActualDictionary = actualDictionary;
+                ShowDictionary = showDictionary;
+                ElementName = dictionaryElementName;
+                IsCustomDataTypeDictionary = isCustomDataTypeDictionary;
+            }
+        }
+
         public struct FoldoutInfo
         {
             public int StartIndex;
@@ -47,22 +65,36 @@ namespace ReverseTowerDefense
             }
         }
 
+        public struct DictionaryPair<T1, T2>
+        {
+            public T1 Key;
+            public T2 Value;
+
+            public DictionaryPair(T1 key, T2 value)
+            {
+                Key = key;
+                Value = value;
+            }
+        }
+
         private static GUIStyle centeredBoldLabelStyle;
         private static GUIStyle boldLabelStyle;
         private static GUIStyle boldFoldoutStyle;
+
+        List<Type> inheritedClassesList = new List<Type>();
 
         // Contains the data of non-serialized as well as serialized lists
         private Dictionary<FieldInfo, ListInfo> serializedLists;
         private Dictionary<string, ReorderableList> nameToReorderableListsMap;
         private Dictionary<FieldInfo, bool> customTypeFieldToFoldoutMap = new Dictionary<FieldInfo, bool>();
-        private Dictionary<string, bool> listElementFoldoutsMap = new Dictionary<string, bool>();
+        private Dictionary<string, bool> nameToFoldoutsMap = new Dictionary<string, bool>();
 
         #region Debug Mode Handlers
 
         private bool isPreviewingAnything = false;
 
         private readonly string showPrivateStuffWithInstanceID = "Show Private Stuff_{0}";
-        private Dictionary<FieldInfo, ListInfo> privateFieldToListMap = new Dictionary<FieldInfo, ListInfo>();
+        private Dictionary<FieldInfo, ListInfo> privateFieldToListMap = new System.Collections.Generic.Dictionary<FieldInfo, ListInfo>();
         private List<FieldInfo> privateFieldsList;
         private bool showPrivateFields = false;
 
@@ -272,8 +304,8 @@ namespace ReverseTowerDefense
         #region Button Handlers
 
         private List<MethodInfo> buttonMethodsList;
-        private Dictionary<string, object[]> methodParametersMap = new Dictionary<string, object[]>();
-        private Dictionary<MethodInfo, bool> methodToClickingInfoMap = new Dictionary<MethodInfo, bool>();
+        private System.Collections.Generic.Dictionary<string, object[]> methodParametersMap = new System.Collections.Generic.Dictionary<string, object[]>();
+        private System.Collections.Generic.Dictionary<MethodInfo, bool> methodToClickingInfoMap = new System.Collections.Generic.Dictionary<MethodInfo, bool>();
 
         private void PopulateButtonMethods()
         {
@@ -529,9 +561,25 @@ namespace ReverseTowerDefense
 
             BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
 
+            List<FieldInfo> totalFieldsList = new List<FieldInfo>();
             Type type = target.GetType();
-            FieldInfo[] fields = type.GetFields(flags);
-            serializeFields = fields.Where(field => field.GetCustomAttribute<SerializeField>() != null).ToList();
+
+            do
+            {
+                inheritedClassesList.Add(type);
+                type = type.BaseType;
+            }
+            while (typeof(MonoBehaviour).IsAssignableFrom(type));
+
+            inheritedClassesList.Reverse();
+
+            foreach(Type classType in inheritedClassesList)
+            {
+                FieldInfo[] fields = classType.GetFields(flags);
+                totalFieldsList.AddRange(fields);
+            }
+
+            serializeFields = totalFieldsList.Where(field => field.GetCustomAttribute<SerializeField>() != null).ToList();
 
             int currentFoldoutStartIndex = 0;
             string currentFoldoutLabel = "Serialized Fields";
@@ -603,7 +651,7 @@ namespace ReverseTowerDefense
             }
             else if (typeof(Object).IsAssignableFrom(fieldType))
             {
-                newValue = EditorGUILayout.ObjectField(fieldName, (Object)value, fieldType, allowSceneObjects: false, guiLayoutOption);
+                newValue = EditorGUILayout.ObjectField(fieldName, (Object)value, fieldType, allowSceneObjects: true, guiLayoutOption);
             }
             else if (fieldType.IsEnum)
             {
@@ -671,7 +719,6 @@ namespace ReverseTowerDefense
                 GUIContent label = new GUIContent(fieldName);
                 newValue = EditorGUILayout.ColorField(label, (Color)value, showEyeDropper, showAlpha, showHdr, guiLayoutOption);
             }
-
             else if(serializedLists.ContainsKey(fieldInfo))
             {
                 ListInfo listInfo = serializedLists[fieldInfo];
@@ -749,7 +796,7 @@ namespace ReverseTowerDefense
                 for(int i = 0; i < list.Count; i++)
                 {
                     string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, i);
-                    listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                    nameToFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
                 }
 
                 AssignCallbacksToReorderableList(listInfo, fieldInfo, elementType, listInfo.ListElementName, reorderableList, isEditable);    
@@ -862,7 +909,7 @@ namespace ReverseTowerDefense
             reorderableList.elementHeightCallback = index =>
             {
                 string elementKey = GetListElementNameInDictionary(fieldInfo, listInfo, index);
-                if (listElementFoldoutsMap.TryGetValue(elementKey, out bool value) && value)
+                if (nameToFoldoutsMap.TryGetValue(elementKey, out bool value) && value)
                 {
                     float lineHeight = EditorGUIUtility.singleLineHeight + 10f;
                     return lineHeight * elementType.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic).Length;
@@ -888,7 +935,7 @@ namespace ReverseTowerDefense
                 if(listInfo.IsCustomDataTypeList)
                 {
                     string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, listInfo.ActualList.Count - 1);
-                    listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                    nameToFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
                 }
 
                 EditorUtility.SetDirty(target);
@@ -919,9 +966,15 @@ namespace ReverseTowerDefense
             string conditionFieldName = showIfAttribute.ConditionFieldName;
             object conditionFieldValue = showIfAttribute.ConditionFieldValue;
 
-            Type type = target.GetType();
+            FieldInfo conditionField = null;
 
-            FieldInfo conditionField = type.GetField(conditionFieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            foreach(Type inheritedClassType in inheritedClassesList)
+            {
+                if (conditionField == null)
+                {
+                    conditionField = inheritedClassType.GetField(conditionFieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+            }
 
             if (conditionField == null)
             {
@@ -949,7 +1002,7 @@ namespace ReverseTowerDefense
             {
                 string elementNameInDictionary = GetListElementNameInDictionary(fieldInfo, listInfo, i);
 
-                listElementFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
+                nameToFoldoutsMap.Add(elementNameInDictionary, EditorPrefs.GetBool(elementNameInDictionary, false));
                 EditorPrefs.SetBool(elementNameInDictionary, false);
             }
         }
@@ -959,14 +1012,14 @@ namespace ReverseTowerDefense
             List<string> keysToRemove = new List<string>();
             Dictionary<string, bool> tempFoldoutsMap = new Dictionary<string ,bool>();
 
-            foreach(var pair in listElementFoldoutsMap)
+            foreach(var pair in nameToFoldoutsMap)
             {
                 if(!pair.Key.Contains(listPrefix))
                 {
                     tempFoldoutsMap.Add(pair.Key, pair.Value);
                 }
             }
-            listElementFoldoutsMap = new Dictionary<string, bool>(tempFoldoutsMap);
+            nameToFoldoutsMap = new Dictionary<string, bool>(tempFoldoutsMap);
         }
 
         private string GetListElementNameInDictionary(FieldInfo fieldInfo, ListInfo listInfo, int index)
@@ -1212,9 +1265,9 @@ namespace ReverseTowerDefense
         {
             bool foldoutValue = false;
 
-            if (listElementFoldoutsMap.ContainsKey(elementNameInDictionary))
+            if (nameToFoldoutsMap.ContainsKey(elementNameInDictionary))
             {
-                foldoutValue = listElementFoldoutsMap[elementNameInDictionary];
+                foldoutValue = nameToFoldoutsMap[elementNameInDictionary];
             }
             BindingFlags flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic;
             FieldInfo[] customDataTypeFields = fieldType.GetFields(flags);
@@ -1245,7 +1298,7 @@ namespace ReverseTowerDefense
             }
 
             EditorGUI.indentLevel--;
-            listElementFoldoutsMap[elementNameInDictionary] = foldoutValue;
+            nameToFoldoutsMap[elementNameInDictionary] = foldoutValue;
             EditorPrefs.SetBool(elementNameInDictionary, foldoutValue);
             return element;
         }
@@ -1297,7 +1350,7 @@ namespace ReverseTowerDefense
 
         private bool IsFieldCustomClassType(Type fieldType, object value)
         {
-            return (!fieldType.Namespace.Contains("UnityEngine") && fieldType.IsClass && value != null && !IsTypeInheritingFromMonoBehaviourOrScriptableObject(fieldType));
+            return (!fieldType.Namespace.Contains("UnityEngine") && fieldType.GetCustomAttribute<NonCustomClass>() == null && fieldType.IsClass && value != null && !IsTypeInheritingFromMonoBehaviourOrScriptableObject(fieldType));
         }
 
         private bool IsTypeInheritingFromMonoBehaviourOrScriptableObject(Type fieldType)
@@ -1316,6 +1369,24 @@ namespace ReverseTowerDefense
             EditorGUILayout.ObjectField("Script", monoScript, GetType(), false);
 
             EditorGUI.EndDisabledGroup();
+        }
+
+        private void AssignEditorModeConfigFile()
+        {
+            if (editorDebugModeConfigSO == null)
+            {
+                editorDebugModeConfigSO = AssetDatabase.LoadAssetAtPath<EditorDebugModeConfigSO>("Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
+
+                if (editorDebugModeConfigSO == null)
+                {
+                    editorDebugModeConfigSO = CreateInstance<EditorDebugModeConfigSO>();
+
+                    AssetDatabase.CreateFolder("Assets", "Custom Attributes Config");
+                    AssetDatabase.CreateAsset(editorDebugModeConfigSO, "Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
+
+                    AssetDatabase.SaveAssets();
+                }
+            }
         }
 
         private void AssignGUIStyles()
@@ -1346,21 +1417,7 @@ namespace ReverseTowerDefense
         {
             DrawScriptObject();
 
-            if (editorDebugModeConfigSO == null)
-            {
-                editorDebugModeConfigSO = AssetDatabase.LoadAssetAtPath<EditorDebugModeConfigSO>("Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
-
-                if(editorDebugModeConfigSO == null)
-                {
-                    editorDebugModeConfigSO = CreateInstance<EditorDebugModeConfigSO>();
-
-                    AssetDatabase.CreateFolder("Assets", "Custom Attributes Config");
-                    AssetDatabase.CreateAsset(editorDebugModeConfigSO, "Assets/Custom Attributes Config/Editor Debug Mode Config.asset");
-
-                    AssetDatabase.SaveAssets();
-                }
-            }
-
+            AssignEditorModeConfigFile();
             AssignGUIStyles();
 
             HandleFoldouts();
